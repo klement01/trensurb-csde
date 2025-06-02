@@ -7,19 +7,19 @@
 */
 
 // Define travel direction or dynamic travel direction mode.
-// 0 - North
-// 1 - South
+// 0b01 - North
+// 0b10 - South
 // Other: runtime (i.e. using TRAVEL_DIRECTION_PIN)
-#define TRAVEL_DIRECTION 0
-const byte TRAVEL_DIRECTION_NORTH = 1;
-const byte TRAVEL_DIRECTION_SOUTH = 2;
-byte travelDirection;
+#define TRAVEL_DIRECTION TRAVEL_DIRECTION_DYNAMIC
+const uint8_t TRAVEL_DIRECTION_DYNAMIC = 0b00;
+const uint8_t TRAVEL_DIRECTION_NORTH = 0b01;
+const uint8_t TRAVEL_DIRECTION_SOUTH = 0b10;
+uint8_t travelDirection;
 
-const byte DOOR_ENABLE_NONE = 0;
-const byte DOOR_ENABLE_LEFT = 1;
-const byte DOOR_ENABLE_RIGHT = 2;
-constexpr byte DOOR_ENABLE_BOTH = DOOR_ENABLE_LEFT | DOOR_ENABLE_RIGHT;
-byte doorEnable;
+const uint8_t DOOR_ENABLE_NONE = 0b00;
+const uint8_t DOOR_ENABLE_LEFT = 0b01;
+const uint8_t DOOR_ENABLE_RIGHT = 0b10;
+constexpr uint8_t DOOR_ENABLE_BOTH = DOOR_ENABLE_LEFT | DOOR_ENABLE_RIGHT;
 
 /*
  READER CONSTANTS AND VARIABLES.
@@ -32,10 +32,10 @@ byte doorEnable;
 // PICC: Proximity Integrated Circuit Card (tag).
 
 // IO pins.
-const byte RIGHT_LED_PIN = 7;
-const byte LEFT_LED_PIN = 6;
-const byte TRAVEL_DIRECTION_PIN = 5;
-const byte MODE_PIN = 4;
+const uint8_t RIGHT_LED_PIN = 7;
+const uint8_t LEFT_LED_PIN = 6;
+const uint8_t TRAVEL_DIRECTION_PIN = 5;
+const uint8_t MODE_PIN = 4;
 
 // Commonly used constants.
 using StatusCode = MFRC522Constants::StatusCode;
@@ -46,11 +46,11 @@ using Uid = MFRC522Constants::Uid;
 using MIFARE_Key = MFRC522Constants::MIFARE_Key;
 
 // MIFARE Classic 1K: 16 sectors, 4 blocks per sector, 16 bytes per block.
-const byte SECTORS_PER_TAG = 16;
-const byte BLOCKS_PER_SECTOR = 4;
-const byte BYTES_PER_BLOCK = 16;
-constexpr byte BYTES_PER_SECTOR = BLOCKS_PER_SECTOR * BYTES_PER_BLOCK;
-constexpr byte BYTES_PER_TAG = SECTORS_PER_TAG * BYTES_PER_SECTOR;
+const uint8_t SECTORS_PER_TAG = 16;
+const uint8_t BLOCKS_PER_SECTOR = 4;
+const uint8_t BYTES_PER_BLOCK = 16;
+constexpr uint8_t BYTES_PER_SECTOR = BLOCKS_PER_SECTOR * BYTES_PER_BLOCK;
+constexpr uint8_t BYTES_PER_TAG = SECTORS_PER_TAG * BYTES_PER_SECTOR;
 
 // Reader object definitions.
 MFRC522DriverPinSimple ssPin(10);
@@ -69,26 +69,27 @@ void setup() {
   while (!Serial)
     ;
 
+  // Initialize output pins.
+  pinMode(LEFT_LED_PIN, OUTPUT);
+  pinMode(RIGHT_LED_PIN, OUTPUT);
+  pinMode(MODE_PIN, INPUT_PULLUP);
+
   // Initialize reader.
   bool suc = reader.PCD_Init();
   if (!suc) {
     Serial.println("ERR");
     halt();
   }
+  reader.PICC_HaltA();
+  reader.PCD_StopCrypto1();
 
   // Initialize factory key.
   for (int8_t i = 0; i < 6; i++) {
     key.keyByte[i] = 0xFF;
   }
 
-  // Initialize output pins.
-  pinMode(LEFT_LED_PIN, OUTPUT);
-  pinMode(RIGHT_LED_PIN, OUTPUT);
-
 #ifdef DEV_MODE
   // Enable writer mode.
-  pinMode(MODE_PIN, INPUT_PULLUP);
-
   if (!digitalRead(MODE_PIN)) {
     digitalWrite(LEFT_LED_PIN, HIGH);
     digitalWrite(RIGHT_LED_PIN, HIGH);
@@ -110,56 +111,90 @@ void setup() {
       travelDirection = digitalRead(TRAVEL_DIRECTION_PIN) ? TRAVEL_DIRECTION_NORTH : TRAVEL_DIRECTION_SOUTH;
   }
 
-  doorEnable = DOOR_ENABLE_NONE;
+  Serial.print(F("Travel direction: "));
+  switch (travelDirection) {
+    case TRAVEL_DIRECTION_NORTH:
+      Serial.println("North");
+      break;
+    case TRAVEL_DIRECTION_SOUTH:
+      Serial.println("South");
+      break;
+    default:
+      Serial.println("Invalid");
+  }
 }
 
 
 void loop() {
   // Loop for controller mode.
-  Uid *uid;
+  Uid *uid = nullptr;
   while (!(uid = newMifare1KPresent(reader)))
     ;
 
-  updateControllerWithTag(reader, uid, &key);
+  uint8_t doorEnable;
+  if (updateControllerWithTag(reader, &(reader.uid), &key, doorEnable)) {
+    digitalWrite(LEFT_LED_PIN, doorEnable & DOOR_ENABLE_LEFT);
+    digitalWrite(RIGHT_LED_PIN, doorEnable & DOOR_ENABLE_RIGHT);
+  }
 
   reader.PICC_HaltA();  // Halt the PICC before stopping the encrypted session.
   reader.PCD_StopCrypto1();
 }
 
 
-void updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key) {
-  byte sector[BLOCKS_PER_SECTOR][BYTES_PER_BLOCK];
+Uid *newMifare1KPresent(MFRC522 &device) {
+  // Return true when a new Mifare 1K card is detected, false otherwise.
+  if (reader.PICC_IsNewCardPresent() && reader.PICC_ReadCardSerial()) {
+    auto uid = &(reader.uid);
+    if (reader.PICC_GetType(uid->sak) == PICC_Type::PICC_TYPE_MIFARE_1K) {
+      return uid;
+    }
+  }
+  return nullptr;
+}
 
-  if (!PICC_ReadMifareClassic1KSector(reader, uid, key, 0, sector)) {
-    // TODO: deal with reading faiure.
-    return;
+
+bool updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key, uint8_t &doorEnable) {
+  // Read tag. When applicable, update doorEnabled and return true.
+
+  uint8_t sector[BLOCKS_PER_SECTOR][BYTES_PER_BLOCK];
+  if (!PICC_ReadMifareClassic1KSector(reader, uid, key, 0, sector, 5)) {
+    Serial.println("Failed to read tag.");
+    // TODO: make tag reading more reliable.
+    // TODO: deal with new tags detected as they exit zone.
+    // doorEnable = DOOR_ENABLE_NONE;
+    // return true;
+    return false;
   }
 
   if ((sector[1][0] & 0xF0 != 0x10) || (sector[2][0] & 0xF0 != 0x20)) {
-    // TODO: deal with invalid block numbers.
-    return;
+    Serial.println("Invalid block numbers.");
+    doorEnable = DOOR_ENABLE_NONE;
+    return true;
   }
   sector[1][0] &= 0x0F;
   sector[2][0] &= 0x0F;
 
   if (memcmp(sector[1], sector[2], BYTES_PER_BLOCK) != 0) {
-    // TODO: deal with reading mismatch.
-    return;
+    Serial.println("Blocks don't match.");
+    doorEnable = DOOR_ENABLE_NONE;
+    return true;
   }
 
   // Parse sectors.
   auto b = sector[1];
 
-  bool asdo_enabled = (b[0] & 0x08) != 0;
-  byte approach_direction = (b[0] & 0x06) >> 1;
-  byte version = ((b[0] & 0x01) << 1) | ((b[1] & 0x80) >> 7);
-  byte application_code = b[1] & 0x7F;
-  byte csde = (b[2] & 0xC0) >> 6;
-  uint16_t stop_zone_length = ((b[2] & 0x3F) << 4) | ((b[3] & 0xF0) >> 4);
-  uint16_t station_id = ((b[3] & 0x0F) << 1) | (b[4] << 3) | ((b[5] & 0xF0) >> 5);
-  uint8_t platform_id = b[5] & 0x0F;
+  bool asdoEnabled = (b[0] & 0x08) != 0;
+  uint8_t approachDirection = (b[0] & 0x06) >> 1;
+  uint8_t version = ((b[0] & 0x01) << 1) | ((b[1] & 0x80) >> 7);
+  uint8_t applicationCode = b[1] & 0x7F;
+  uint8_t csde = (b[2] & 0xC0) >> 6;
+  uint16_t stopZoneLength = ((b[2] & 0x3F) << 4) | ((b[3] & 0xF0) >> 4);
+  uint16_t stationId = ((b[3] & 0x0F) << 1) | (b[4] << 3) | ((b[5] & 0xF0) >> 5);
+  uint8_t platformId = b[5] & 0x0F;
 
-  Serial.print(F("Block 1: "));
+  // Dump sectors to Serial.
+  Serial.print(F("Block read: "));
   for (int i = 0; i < BYTES_PER_BLOCK; i++) {
     if (b[i] < 0x10) Serial.print("0");
     Serial.print(b[i], HEX);
@@ -168,10 +203,10 @@ void updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key) {
   Serial.println();
 
   Serial.print(F("ASDO Enabled: "));
-  Serial.println(asdo_enabled);
+  Serial.println(asdoEnabled);
 
   Serial.print(F("Approach direction: "));
-  switch (approach_direction) {
+  switch (approachDirection) {
     case TRAVEL_DIRECTION_NORTH:
       Serial.println("North");
       break;
@@ -186,7 +221,7 @@ void updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key) {
   Serial.println(version);
 
   Serial.print(F("Application code: "));
-  Serial.println(application_code);
+  Serial.println(applicationCode);
 
   Serial.print(F("CSDE: "));
   switch (csde) {
@@ -207,89 +242,78 @@ void updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key) {
   }
 
   Serial.print(F("Stop zone length: "));
-  Serial.println(stop_zone_length);
+  Serial.println(stopZoneLength);
 
   Serial.print(F("Station ID: "));
-  Serial.println(station_id);
+  Serial.println(stationId);
 
   Serial.print(F("Platform ID: "));
-  Serial.println(platform_id);
-}
+  Serial.println(platformId);
 
-
-Uid *newMifare1KPresent(MFRC522 &device) {
-  // Return true when a new Mifare 1K card is detected, false otherwise.
-  if (reader.PICC_IsNewCardPresent() && reader.PICC_ReadCardSerial()) {
-    auto uid = &(reader.uid);
-    if (reader.PICC_GetType(uid->sak) == PICC_Type::PICC_TYPE_MIFARE_1K) {
-      return uid;
-    }
+  // Verify if tag is applicable.
+  if (!asdoEnabled
+      || approachDirection != travelDirection
+      || version != 0
+      || applicationCode != 1) {
+    return false;
   }
-  return nullptr;
+
+  // Update door enable.
+  if (stopZoneLength > 0) {
+    doorEnable = csde;
+  } else {
+    doorEnable = DOOR_ENABLE_NONE;
+  }
+  return true;
 }
 
 
-bool PICC_ReadMifareClassic1KSector(MFRC522 &device, Uid *uid, MIFARE_Key *key, byte sector, byte outBuffer[][BYTES_PER_BLOCK]) {
+bool PICC_ReadMifareClassic1KSector(
+  MFRC522 &device,
+  Uid *uid,
+  MIFARE_Key *key,
+  byte sector, byte outBuffer[][BYTES_PER_BLOCK],
+  uint8_t maxRetries) {
   // Based on MFRC522Debug::PICC_DumpMifareClassicSectorToSerial.
+
   MFRC522::StatusCode status;
-  byte firstBlock = sector * BLOCKS_PER_SECTOR;
+  int i;
+  uint8_t firstBlock = sector * BLOCKS_PER_SECTOR;
 
   // Establish encrypted communications before reading.
-  status = device.PCD_Authenticate(PICC_Command::PICC_CMD_MF_AUTH_KEY_A, firstBlock, key, uid);
-  if (status != StatusCode::STATUS_OK) {
-    Serial.print(F("PCD_Authenticate() failed: "));
-    DumpStatusCodeNameToSerial(status);
-    Serial.println();
-    return false;
+  for (i = 1; i <= maxRetries; i++) {
+    status = device.PCD_Authenticate(PICC_Command::PICC_CMD_MF_AUTH_KEY_A, firstBlock, key, uid);
+    if (status == StatusCode::STATUS_OK) {
+      break;
+    }
+    if (i == maxRetries) {
+      return false;
+    }
+    delay(100);
   }
 
   // Dump blocks, highest address first.
   for (int8_t block = BLOCKS_PER_SECTOR - 1; block >= 0; block--) {
-    byte blockAddr = firstBlock + block;
+    uint8_t blockAddr = firstBlock + block;
 
     // Read block
-    byte buffer[BYTES_PER_BLOCK + 2];  // 2 CRC bits.
-    byte byteCount = sizeof(buffer);
-    status = device.MIFARE_Read(blockAddr, buffer, &byteCount);
-    if (status != StatusCode::STATUS_OK) {
-      Serial.print(F("MIFARE_Read() failed: "));
-      DumpStatusCodeNameToSerial(status);
-      Serial.println();
-      return false;
-    }
+    uint8_t buffer[BYTES_PER_BLOCK + 2];  // 2 CRC bits.
+    uint8_t byteCount = sizeof(buffer);
 
-    // Parse sector trailer data
-    if (block + 1 == BLOCKS_PER_SECTOR) {
-      // The access bits are stored in a peculiar fashion.
-      // There are four groups:
-      //		g[3]	Access bits for the sector trailer, block 3.
-      //		g[2]	Access bits for block 2.
-      //		g[1]	Access bits for block 1.
-      //		g[0]	Access bits for block 0.
-      // Each group has access bits [C1 C2 C3]. In this code C1 is MSB and C3 is LSB.
-      // The four CX bits are stored together in a nible cx and an inverted nible cx_.
-      byte c1, c2, c3;     // Nibbles.
-      byte c1_, c2_, c3_;  // Inverted nibbles.
-      byte g[4];           // Access bits for each of the four groups.
-
-      c1 = buffer[7] >> 4;
-      c2 = buffer[8] & 0xF;
-      c3 = buffer[8] >> 4;
-      c1_ = buffer[6] & 0xF;
-      c2_ = buffer[6] >> 4;
-      c3_ = buffer[7] & 0xF;
-      if ((c1 != (~c1_ & 0xF)) || (c2 != (~c2_ & 0xF)) || (c3 != (~c3_ & 0xF))) {
-        // Inverted error.
-        Serial.println(F("Inverted access bits did not match!"));
+    for (i = 1; i <= maxRetries; i++) {
+      status = device.MIFARE_Read(blockAddr, buffer, &byteCount);
+      if (status == StatusCode::STATUS_OK) {
+        break;
+      }
+      if (i == maxRetries) {
+        device.PICC_HaltA();
+        device.PCD_StopCrypto1();
         return false;
       }
-
-      g[0] = ((c1 & 1) << 2) | ((c2 & 1) << 1) | ((c3 & 1) << 0);
-      g[1] = ((c1 & 2) << 1) | ((c2 & 2) << 0) | ((c3 & 2) >> 1);
-      g[2] = ((c1 & 4) << 0) | ((c2 & 4) >> 1) | ((c3 & 4) >> 2);
-      g[3] = ((c1 & 8) >> 1) | ((c2 & 8) >> 2) | ((c3 & 8) >> 3);
+      delay(100);
     }
 
+    // Copy block to output buffer.
     for (int8_t i = 0; i < BYTES_PER_BLOCK; i++) {
       outBuffer[block][i] = buffer[i];
     }
@@ -307,7 +331,7 @@ void writeFromSerial() {
   Serial.println("WRITER READY");
 
   // Receives and echoes block to write.
-  byte blockBytes[BYTES_PER_BLOCK] = {};
+  uint8_t blockBytes[BYTES_PER_BLOCK] = {};
   Serial.readBytes(blockBytes, BYTES_PER_BLOCK);
   Serial.write(blockBytes, BYTES_PER_BLOCK);
 
@@ -332,7 +356,7 @@ void writeFromSerial() {
   // Write to blocks 1 and 2.
   for (int i = 1; i <= 2; i++) {
     // Sets the block number in the first byte.
-    byte fb = blockBytes[0];
+    uint8_t fb = blockBytes[0];
     fb &= 0x0F;
     fb |= i << 4 & 0xF0;
     blockBytes[0] = fb;
