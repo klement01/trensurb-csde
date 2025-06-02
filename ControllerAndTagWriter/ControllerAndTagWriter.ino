@@ -18,6 +18,7 @@ byte travelDirection;
 const byte DOOR_ENABLE_NONE = 0;
 const byte DOOR_ENABLE_LEFT = 1;
 const byte DOOR_ENABLE_RIGHT = 2;
+constexpr byte DOOR_ENABLE_BOTH = DOOR_ENABLE_LEFT | DOOR_ENABLE_RIGHT;
 byte doorEnable;
 
 /*
@@ -131,29 +132,88 @@ void updateControllerWithTag(MFRC522 &device, Uid *uid, MIFARE_Key *key) {
 
   if (!PICC_ReadMifareClassic1KSector(reader, uid, key, 0, sector)) {
     // TODO: deal with reading faiure.
+    return;
   }
 
   if ((sector[1][0] & 0xF0 != 0x10) || (sector[2][0] & 0xF0 != 0x20)) {
     // TODO: deal with invalid block numbers.
+    return;
   }
   sector[1][0] &= 0x0F;
   sector[2][0] &= 0x0F;
 
   if (memcmp(sector[1], sector[2], BYTES_PER_BLOCK) != 0) {
-    // TODO: deal with reading mismatch;
+    // TODO: deal with reading mismatch.
+    return;
   }
 
   // Parse sectors.
   auto b = sector[1];
 
   bool asdo_enabled = (b[0] & 0x08) != 0;
-  byte approach_direction = b[0] & 0x06 >> 1;
-  byte version = (b[0] & 0x01 << 1) | (b[1] & 0x80 >> 7);
+  byte approach_direction = (b[0] & 0x06) >> 1;
+  byte version = ((b[0] & 0x01) << 1) | ((b[1] & 0x80) >> 7);
   byte application_code = b[1] & 0x7F;
-  byte csde = b[2] & 0xC0 >> 6;
-  uint16_t stop_zone_length = (b[2] & 0x3F << 4) | (b[3] & 0xF0 >> 4);
-  uint16_t station_id = (b[3] & 0x0F << 1) | (b[4] << 3) | (b[5] & 0xF0 >> 5);
+  byte csde = (b[2] & 0xC0) >> 6;
+  uint16_t stop_zone_length = ((b[2] & 0x3F) << 4) | ((b[3] & 0xF0) >> 4);
+  uint16_t station_id = ((b[3] & 0x0F) << 1) | (b[4] << 3) | ((b[5] & 0xF0) >> 5);
   uint8_t platform_id = b[5] & 0x0F;
+
+  Serial.print(F("Block 1: "));
+  for (int i = 0; i < BYTES_PER_BLOCK; i++) {
+    if (b[i] < 0x10) Serial.print("0");
+    Serial.print(b[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
+
+  Serial.print(F("ASDO Enabled: "));
+  Serial.println(asdo_enabled);
+
+  Serial.print(F("Approach direction: "));
+  switch (approach_direction) {
+    case TRAVEL_DIRECTION_NORTH:
+      Serial.println("North");
+      break;
+    case TRAVEL_DIRECTION_SOUTH:
+      Serial.println("South");
+      break;
+    default:
+      Serial.println("Invalid");
+  }
+
+  Serial.print(F("Version: "));
+  Serial.println(version);
+
+  Serial.print(F("Application code: "));
+  Serial.println(application_code);
+
+  Serial.print(F("CSDE: "));
+  switch (csde) {
+    case DOOR_ENABLE_NONE:
+      Serial.println("None");
+      break;
+    case DOOR_ENABLE_LEFT:
+      Serial.println("Left");
+      break;
+    case DOOR_ENABLE_RIGHT:
+      Serial.println("Right");
+      break;
+    case DOOR_ENABLE_BOTH:
+      Serial.println("Both");
+      break;
+    default:
+      Serial.println("Invalid");
+  }
+
+  Serial.print(F("Stop zone length: "));
+  Serial.println(stop_zone_length);
+
+  Serial.print(F("Station ID: "));
+  Serial.println(station_id);
+
+  Serial.print(F("Platform ID: "));
+  Serial.println(platform_id);
 }
 
 
